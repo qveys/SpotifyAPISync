@@ -18,7 +18,7 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
 # --- Utilitaires génériques ---
-def http_request(method, url, headers=None, data=None, params=None, max_retries=5, timeout=10):
+def http_request(method, url, headers=None, data=None, params=None, max_retries=3, timeout=10):
     for attempt in range(1, max_retries + 1):
         try:
             if method == 'GET':
@@ -39,13 +39,12 @@ def http_request(method, url, headers=None, data=None, params=None, max_retries=
                 continue
             if resp.status_code >= 500:
                 logging.warning(f"HTTP {resp.status_code} on {url}, retrying ({attempt}/{max_retries})...")
-                time.sleep(3 ** attempt)
+                time.sleep(2 ** attempt)
                 continue
-            logging.info(f"HTTP {method} {url} -> {resp.status_code}")
             return resp
         except requests.RequestException as e:
             logging.warning(f"Request error: {e}, retrying ({attempt}/{max_retries})...")
-            time.sleep(3 ** attempt)
+            time.sleep(2 ** attempt)
     logging.error(f"Failed to {method} {url} after {max_retries} attempts.")
     raise RuntimeError(f"HTTP request failed: {method} {url}")
 
@@ -181,7 +180,7 @@ def get_all_playlists_with_tracks(token):
         playlists[name]["track_ids"] = track_ids
     return playlists
 
-def create_playlist(token, name, public=True):
+def create_playlist(token, name, public=True, processed_playlists=None, total_playlists=None):
     user_id = get_user_details(token)["id"]
     url = f"https://api.spotify.com/v1/users/{user_id}/playlists"
     headers = get_auth_header(token)
@@ -191,6 +190,10 @@ def create_playlist(token, name, public=True):
     if response.status_code != 201:
         logging.error(f"Failed to create playlist '{name}': {response.text}")
         raise RuntimeError(f"Spotify API error: {response.text}")
+    if processed_playlists is not None and total_playlists is not None:
+        logging.info(f"Created new playlist '{name}' ({processed_playlists}/{total_playlists} {processed_playlists/total_playlists*100:.2f}%)")
+    else:
+        logging.info(f"Created new playlist '{name}'")
     return response.json()
 
 def updating_playlist_name(token, playlist_id, new_name):
@@ -201,6 +204,8 @@ def updating_playlist_name(token, playlist_id, new_name):
     response = http_request('PUT', url, headers=headers, data=data)
     if response.status_code not in (200, 201):
         logging.warning(f"Failed to update playlist name: {response.text}")
+    else:
+        logging.info(f"Renamed playlist to '{new_name}' (id: {playlist_id})")
 
 def search_the_song(token, artist_name, track_name):
     query = f"track:{track_name} artist:{artist_name}"
@@ -213,7 +218,7 @@ def search_the_song(token, artist_name, track_name):
         return tracks[0]
     return None
 
-def add_tracks_to_playlist_batch(token, playlist_id, track_uris):
+def add_tracks_to_playlist_batch(token, playlist_id, track_uris, processed_songs=None, total_songs=None):
     url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
@@ -224,7 +229,10 @@ def add_tracks_to_playlist_batch(token, playlist_id, track_uris):
         if response.status_code not in (200, 201):
             logging.warning(f"Failed to add tracks to playlist: {response.text}")
         else:
-            logging.info(f"Added {len(batch)} tracks to playlist (id: {playlist_id})")
+            if processed_songs is not None and total_songs is not None:
+                logging.info(f"Added {len(batch)} tracks to playlist (id: {playlist_id}) ({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%)")
+            else:
+                logging.info(f"Added {len(batch)} tracks to playlist (id: {playlist_id})")
 
 # --- Stats class ---
 class Stats:
@@ -247,11 +255,13 @@ class Stats:
         print("-------------------------------------------\n")
 
 # --- Traitement principal d'un fichier CSV ---
-def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
+def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats', processed_files=None, total_files=None):
     title = csv_path.stem
     title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
-    print(f"\n")
-    logging.info(f"Processing file: {csv_path.name} | Title: {title}")
+    if processed_files is not None and total_files is not None:
+        logging.info(f"Processing file: {csv_path.name} ({processed_files}/{total_files} {processed_files/total_files*100:.2f}%) | Title: {title}")
+    else:
+        logging.info(f"Processing file: {csv_path.name} | Title: {title}")
     playlist_id = None
     track_ids_set = set()
     playlist_found = False
@@ -262,7 +272,6 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
             playlist_found = True
             if name != title_without_date:
                 updating_playlist_name(token, playlist_id, title_without_date)
-                logging.info(f"Updated playlist name from '{name}' to '{title_without_date}'")
                 stats.playlists_updated += 1
             break
     if not playlist_found:
@@ -270,7 +279,6 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
         playlist_id = playlist["id"]
         track_ids_set = set()
         playlists_concern[title_without_date] = {"id": playlist_id, "track_ids": track_ids_set}
-        logging.info(f"Created new playlist '{title_without_date}' (id: {playlist_id})")
         stats.playlists_created += 1
     with csv_path.open('r') as file:
         csv_reader = list(csv.reader(file))
@@ -293,6 +301,7 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
                     results[idx] = None
                     logging.warning(f"Track search failed at line {idx+4} in {csv_path.name}: {exc}")
         to_add_uris = []
+        processed_songs = 0
         for idx, (row, track) in enumerate(zip(lines, results), 1):
             artist_name = row[1]
             track_name = row[0]
@@ -301,14 +310,15 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
                     to_add_uris.append(track["uri"])
                     track_ids_set.add(track["id"])
                     stats.tracks_added += 1
+                    processed_songs += 1
+                    logging.info(f"Track to add: {track_name} by {artist_name} ({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%)")
                 else:
                     stats.tracks_already_present += 1
             else:
-                print('\n')
                 logging.warning(f"Not found: {track_name} by {artist_name} in file: {csv_path.name}")
                 stats.tracks_not_found += 1
         if to_add_uris:
-            add_tracks_to_playlist_batch(token, playlist_id, to_add_uris)
+            add_tracks_to_playlist_batch(token, playlist_id, to_add_uris, processed_songs=processed_songs, total_songs=total_songs)
         else:
             logging.info(f"No new tracks to add for playlist '{title_without_date}'")
 
@@ -337,8 +347,9 @@ def main():
         return
     playlists_concern = get_all_playlists_with_tracks(token)
     stats = Stats()
-    for csv_path in csv_files:
-        process_file(token, playlists_concern, csv_path, stats)
+    total_files = len(csv_files)
+    for processed_files, csv_path in enumerate(csv_files, 1):
+        process_file(token, playlists_concern, csv_path, stats, processed_files=processed_files, total_files=total_files)
     stats.print_summary()
 
 # --- Point d'entrée ---
