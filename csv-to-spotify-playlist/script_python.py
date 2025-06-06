@@ -307,7 +307,6 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
 def main():
     directory = Path("/Users/laurent/Downloads/CSV-to-spotify-playlist/csv-to-spotify-playlist")
     csv_files = list(directory.glob("*.csv"))
-    user_input_update = input("Do you want to run the whole script or update any existing playlist? (run/update): ").lower()
     redirect_uri = "https://www.google.co.in/"
     refresh_token = os.getenv("REFRESH_TOKEN")
     token = None
@@ -329,13 +328,8 @@ def main():
         return
     playlists_concern = get_all_playlists_with_tracks(token)
     stats = Stats()
-    if user_input_update == "update":
-        filepath = input("Enter the absolute path of the file you want to update: ")
-        csv_path = Path(filepath)
+    for csv_path in csv_files:
         process_file(token, playlists_concern, csv_path, stats)
-    else:
-        for csv_path in csv_files:
-            process_file(token, playlists_concern, csv_path, stats)
     stats.print_summary()
 
 # --- Point d'entrée ---
