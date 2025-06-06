@@ -191,7 +191,7 @@ def create_playlist(token, name, public=True, processed_playlists=None, total_pl
         logging.error(f"Failed to create playlist '{name}': {response.text}")
         raise RuntimeError(f"Spotify API error: {response.text}")
     if processed_playlists is not None and total_playlists is not None:
-        logging.info(f"Created new playlist '{name}' ({processed_playlists}/{total_playlists} {processed_playlists/total_playlists*100:.2f}%)")
+        logging.info(f"({processed_playlists}/{total_playlists} {processed_playlists/total_playlists*100:.2f}%) > Created new playlist '{name}'")
     else:
         logging.info(f"Created new playlist '{name}'")
     return response.json()
@@ -230,7 +230,7 @@ def add_tracks_to_playlist_batch(token, playlist_id, track_uris, processed_songs
             logging.warning(f"Failed to add tracks to playlist: {response.text}")
         else:
             if processed_songs is not None and total_songs is not None:
-                logging.info(f"Added {len(batch)} tracks to playlist (id: {playlist_id}) ({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%)")
+                logging.info(f"({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%) > Added {len(batch)} tracks to playlist (id: {playlist_id})")
             else:
                 logging.info(f"Added {len(batch)} tracks to playlist (id: {playlist_id})")
 
@@ -259,7 +259,7 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats', proce
     title = csv_path.stem
     title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
     if processed_files is not None and total_files is not None:
-        logging.info(f"Processing file: {csv_path.name} ({processed_files}/{total_files} {processed_files/total_files*100:.2f}%) | Title: {title}")
+        logging.info(f"({processed_files}/{total_files} {processed_files/total_files*100:.2f}%) > Processing file: {csv_path.name} | Title: {title}")
     else:
         logging.info(f"Processing file: {csv_path.name} | Title: {title}")
     playlist_id = None
@@ -285,7 +285,7 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats', proce
         lines = csv_reader[3:]
         total_songs = len(lines)
         if len(track_ids_set) >= total_songs:
-            logging.info(f"Playlist '{title_without_date}' already has {len(track_ids_set)} tracks (CSV: {total_songs}), skipping.")
+            logging.info(f"Playlist '{title_without_date}' already has {len(track_ids_set)} tracks (CSV: {total_songs}), skipping.\n\n")
             stats.files_skipped += 1
             return
         search_args = [(token, row[1], row[0]) for row in lines]
@@ -311,7 +311,7 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats', proce
                     track_ids_set.add(track["id"])
                     stats.tracks_added += 1
                     processed_songs += 1
-                    logging.info(f"Track to add: {track_name} by {artist_name} ({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%)")
+                    logging.info(f"({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%) >Track to add: {track_name} by {artist_name}")
                 else:
                     stats.tracks_already_present += 1
             else:
