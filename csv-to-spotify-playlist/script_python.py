@@ -29,10 +29,11 @@ def http_request(method, url, headers=None, data=None, params=None, max_retries=
                 resp = requests.put(url, headers=headers, data=data, params=params, timeout=timeout)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
-            print(f"\n")
+            
             # Gestion du rate limit Spotify (429)
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", "5"))
+                print(f"\n")
                 logging.warning(f"Rate limited by Spotify (429). Waiting {retry_after} seconds before retrying...")
                 time.sleep(3 ** retry_after)
                 continue
@@ -40,6 +41,7 @@ def http_request(method, url, headers=None, data=None, params=None, max_retries=
                 logging.warning(f"HTTP {resp.status_code} on {url}, retrying ({attempt}/{max_retries})...")
                 time.sleep(3 ** attempt)
                 continue
+            logging.info(f"HTTP {method} {url} -> {resp.status_code}")
             return resp
         except requests.RequestException as e:
             logging.warning(f"Request error: {e}, retrying ({attempt}/{max_retries})...")
