@@ -47,10 +47,13 @@ def http_request(method, url, headers=None, data=None, params=None, max_retries=
     logging.error(f"Failed to {method} {url} after {max_retries} attempts.")
     raise RuntimeError(f"HTTP request failed: {method} {url}")
 
-def update_env_refresh_token(refresh_token, path=".env"):
+def update_env_refresh_token(refresh_token, path=None):
+    if path is None:
+        base_dir = Path(__file__).parent
+        path = base_dir / ".env"
     lines = []
     found = False
-    if os.path.exists(path):
+    if Path(path).exists():
         with open(path, "r") as f:
             for line in f:
                 if line.startswith("REFRESH_TOKEN="):
