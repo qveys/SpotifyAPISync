@@ -7,6 +7,8 @@ import json
 import csv
 from dotenv import load_dotenv
 import re
+import time
+import concurrent.futures
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
@@ -16,6 +18,29 @@ load_dotenv()
 
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+
+# --- HTTP request utilitaire avec retry et timeout ---
+def http_request(method, url, headers=None, data=None, params=None, max_retries=3, timeout=10):
+    for attempt in range(1, max_retries + 1):
+        try:
+            if method == 'GET':
+                resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+            elif method == 'POST':
+                resp = requests.post(url, headers=headers, data=data, params=params, timeout=timeout)
+            elif method == 'PUT':
+                resp = requests.put(url, headers=headers, data=data, params=params, timeout=timeout)
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+            if resp.status_code >= 500:
+                logging.warning(f"HTTP {resp.status_code} on {url}, retrying ({attempt}/{max_retries})...")
+                time.sleep(2 ** attempt)
+                continue
+            return resp
+        except requests.RequestException as e:
+            logging.warning(f"Request error: {e}, retrying ({attempt}/{max_retries})...")
+            time.sleep(2 ** attempt)
+    logging.error(f"Failed to {method} {url} after {max_retries} attempts.")
+    raise RuntimeError(f"HTTP request failed: {method} {url}")
 
 # Fonction pour obtenir un token d'utilisateur avec authentification OAuth
 def get_user_token(client_id, client_secret, redirect_uri):
@@ -42,7 +67,7 @@ def get_user_token(client_id, client_secret, redirect_uri):
         "redirect_uri": redirect_uri
     }
     try:
-        result = requests.post(token_url, headers=headers, data=data)
+        result = http_request('POST', token_url, headers=headers, data=data)
         result.raise_for_status()
         json_result = result.json()
         user_token = json_result.get("access_token")
@@ -63,7 +88,7 @@ def get_auth_header(token):
 def get_user_details(token):
     url = "https://api.spotify.com/v1/me"
     headers = get_auth_header(token)
-    result = requests.get(url, headers=headers)
+    result = http_request('GET', url, headers=headers)
 
     try:
         json_result = result.json()
@@ -89,7 +114,7 @@ def get_all_playlists_with_tracks(token):
     while True:
         url = f"https://api.spotify.com/v1/users/{user_id}/playlists?limit={limit}&offset={offset}"
         headers = get_auth_header(token)
-        resp = requests.get(url, headers=headers)
+        resp = http_request('GET', url, headers=headers)
         resp.raise_for_status()
         items = resp.json().get("items", [])
         if not items:
@@ -110,7 +135,7 @@ def get_all_playlists_with_tracks(token):
         while True:
             url = f"https://api.spotify.com/v1/playlists/{pid}/tracks?fields=items.track.id,total,next&limit={t_limit}&offset={t_offset}"
             headers = get_auth_header(token)
-            resp = requests.get(url, headers=headers)
+            resp = http_request('GET', url, headers=headers)
             resp.raise_for_status()
             data = resp.json()
             items = data.get("items", [])
@@ -131,7 +156,7 @@ def create_playlist(token, name, public=True):
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
     data = json.dumps({"name": name, "public": public})
-    response = requests.post(url, headers=headers, data=data)
+    response = http_request('POST', url, headers=headers, data=data)
     if response.status_code != 201:
         logging.error(f"Failed to create playlist '{name}': {response.text}")
         raise RuntimeError(f"Spotify API error: {response.text}")
@@ -140,7 +165,7 @@ def create_playlist(token, name, public=True):
 def get_tracks_from_playlist(token, playlist_id):
     url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
     headers = get_auth_header(token)
-    result = requests.get(url, headers=headers)
+    result = http_request('GET', url, headers=headers)
     if result.status_code != 200:
         logging.error(f"Failed to fetch tracks for playlist {playlist_id}: {result.text}")
         return []
@@ -154,15 +179,28 @@ def add_tracks_to_playlist(token, playlist_id, track_uris):
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
     data = json.dumps({"uris": track_uris})
-    response = requests.post(url, headers=headers, data=data)
+    response = http_request('POST', url, headers=headers, data=data)
     if response.status_code not in (200, 201):
         logging.warning(f"Failed to add tracks to playlist: {response.text}")
+
+def add_tracks_to_playlist_batch(token, playlist_id, track_uris):
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+    headers = get_auth_header(token)
+    headers["Content-Type"] = "application/json"
+    for i in range(0, len(track_uris), 100):
+        batch = track_uris[i:i+100]
+        data = json.dumps({"uris": batch})
+        response = http_request('POST', url, headers=headers, data=data)
+        if response.status_code not in (200, 201):
+            logging.warning(f"Failed to add tracks to playlist: {response.text}")
+        else:
+            logging.info(f"Added {len(batch)} tracks to playlist (id: {playlist_id})")
 
 def search_the_song(token, artist_name, track_name):
     query = f"track:{track_name} artist:{artist_name}"
     url = f"https://api.spotify.com/v1/search?q={requests.utils.quote(query)}&type=track&limit=1"
     headers = get_auth_header(token)
-    result = requests.get(url, headers=headers)
+    result = http_request('GET', url, headers=headers)
     json_result = result.json()
     tracks = json_result.get("tracks", {}).get("items")
     if tracks:
@@ -174,7 +212,7 @@ def updating_playlist_name(token, playlist_id, new_name):
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
     data = json.dumps({"name": new_name})
-    response = requests.put(url, headers=headers, data=data)
+    response = http_request('PUT', url, headers=headers, data=data)
     if response.status_code not in (200, 201):
         logging.warning(f"Failed to update playlist name: {response.text}")
 
@@ -185,14 +223,17 @@ def process_file(token, playlists_concern, csv_path: Path):
 
     playlist_id = None
     track_ids_set = set()
+    playlist_found = False
     for name, info in playlists_concern.items():
         if name.startswith(title_without_date):
-            logging.info(f"Playlist '{name}' already exists. Updating name to '{title_without_date}' if needed.")
             playlist_id = info["id"]
             track_ids_set = info["track_ids"]
-            updating_playlist_name(token, playlist_id, title_without_date)
+            playlist_found = True
+            if name != title_without_date:
+                updating_playlist_name(token, playlist_id, title_without_date)
+                logging.info(f"Updated playlist name from '{name}' to '{title_without_date}'")
             break
-    else:
+    if not playlist_found:
         playlist = create_playlist(token, title_without_date)
         playlist_id = playlist["id"]
         track_ids_set = set()
@@ -203,23 +244,37 @@ def process_file(token, playlists_concern, csv_path: Path):
         csv_reader = list(csv.reader(file))
         lines = csv_reader[3:]
         total_songs = len(lines)
-        # Si playlist existe déjà et a assez de tracks, skip
         if len(track_ids_set) >= total_songs:
             logging.info(f"Playlist '{title_without_date}' already has {len(track_ids_set)} tracks (CSV: {total_songs}), skipping.")
             return
-        for idx, row in enumerate(lines, 1):
+        # Prépare la liste des requêtes (artist, track)
+        search_args = [(token, row[1], row[0]) for row in lines]
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_idx = {executor.submit(search_the_song, *args): idx for idx, args in enumerate(search_args)}
+            # On récupère les résultats dans l'ordre d'origine
+            results = [None] * len(lines)
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as exc:
+                    results[idx] = None
+                    logging.warning(f"Track search failed at line {idx+4} in {csv_path.name}: {exc}")
+        to_add_uris = []
+        for idx, (row, track) in enumerate(zip(lines, results), 1):
             artist_name = row[1]
             track_name = row[0]
-            track = search_the_song(token, artist_name, track_name)
             if track:
                 if track["id"] not in track_ids_set:
-                    add_tracks_to_playlist(token, playlist_id, [track["uri"]])
+                    to_add_uris.append(track["uri"])
                     track_ids_set.add(track["id"])
-                    logging.info(f"Added: {track_name} by {artist_name} ({idx}/{total_songs})")
-                else:
-                    logging.info(f"Already in playlist: {track_name} by {artist_name} ({idx}/{total_songs})")
             else:
                 logging.warning(f"Not found: {track_name} by {artist_name} in file: {csv_path.name}")
+        if to_add_uris:
+            add_tracks_to_playlist_batch(token, playlist_id, to_add_uris)
+        else:
+            logging.info(f"No new tracks to add for playlist '{title_without_date}'")
 
 def main():
     directory = Path("/Users/laurent/Downloads/CSV-to-spotify-playlist/csv-to-spotify-playlist")
