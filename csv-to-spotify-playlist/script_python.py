@@ -84,8 +84,16 @@ def preexisting_playlist(token, total_playlists):
         url = f"https://api.spotify.com/v1/users/{my_user_id}/playlists?limit={limit}&offset={offset}"
         headers = get_auth_header(token)
         result = requests.get(url, headers=headers)
-        json_result = result.json()
-        playlists = json_result["items"]
+
+        if result.status_code != 200:
+            raise Exception(f"Error fetching playlists: HTTP {result.status_code} - {result.text}")
+
+        try:
+            json_result = result.json()
+        except ValueError:
+            raise Exception("Empty or invalid JSON response from Spotify API")
+
+        playlists = json_result.get("items", [])
         for playlist in playlists:
             playlist_name = playlist["name"]
             playlists_concern[playlist_name] = playlist["id"]
@@ -147,6 +155,10 @@ def main():
 
     redirect_uri = "https://www.google.co.in/"
     token = get_user_token(CLIENT_ID, CLIENT_SECRET, redirect_uri)
+    if not token:
+        print("❌ Failed to obtain a valid user token. Exiting.")
+        return
+
     playlists_concern = get_initial_playlists(token)
 
     def process_file(filepath, filename):
