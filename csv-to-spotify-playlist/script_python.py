@@ -78,27 +78,52 @@ def get_user_details(token):
 
     return json_result
 
-def get_all_playlists(token):
-    """Fetch all playlists for the current user, returns {name: id}."""
+def get_all_playlists_with_tracks(token):
+    """Retourne {playlist_name: {'id': ..., 'track_ids': set([...])}}"""
     user_id = get_user_details(token)["id"]
     limit = 50
     offset = 0
-    playlists_concern = {}
+    playlists = {}
+
+    # Récupère toutes les playlists
     while True:
         url = f"https://api.spotify.com/v1/users/{user_id}/playlists?limit={limit}&offset={offset}"
         headers = get_auth_header(token)
-        result = requests.get(url, headers=headers)
-        if result.status_code != 200:
-            logging.error(f"Error fetching playlists: HTTP {result.status_code} - {result.text}")
-            raise RuntimeError(f"Spotify API error: {result.text}")
-        json_result = result.json()
-        playlists = json_result.get("items", [])
-        if not playlists:
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if not items:
             break
-        for playlist in playlists:
-            playlists_concern[playlist["name"]] = playlist["id"]
+        for playlist in items:
+            playlists[playlist["name"]] = {
+                "id": playlist["id"],
+                "track_ids": set()  # On remplit après
+            }
         offset += limit
-    return playlists_concern
+
+    # Pour chaque playlist, récupère tous les track IDs (pagination)
+    for name, info in playlists.items():
+        pid = info["id"]
+        track_ids = set()
+        t_limit = 100
+        t_offset = 0
+        while True:
+            url = f"https://api.spotify.com/v1/playlists/{pid}/tracks?fields=items.track.id,total,next&limit={t_limit}&offset={t_offset}"
+            headers = get_auth_header(token)
+            resp = requests.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items", [])
+            for item in items:
+                tid = item.get("track", {}).get("id")
+                if tid:
+                    track_ids.add(tid)
+            if not data.get("next"):
+                break
+            t_offset += t_limit
+        playlists[name]["track_ids"] = track_ids
+
+    return playlists
 
 def create_playlist(token, name, public=True):
     user_id = get_user_details(token)["id"]
@@ -158,31 +183,38 @@ def process_file(token, playlists_concern, csv_path: Path):
     title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
     logging.info(f"Processing file: {csv_path.name} | Title: {title}")
 
-    # Playlist: update name if exists, else create
-    for name in playlists_concern:
+    playlist_id = None
+    track_ids_set = set()
+    for name, info in playlists_concern.items():
         if name.startswith(title_without_date):
             logging.info(f"Playlist '{name}' already exists. Updating name to '{title_without_date}' if needed.")
-            playlist_id = playlists_concern[name]
+            playlist_id = info["id"]
+            track_ids_set = info["track_ids"]
             updating_playlist_name(token, playlist_id, title_without_date)
             break
     else:
         playlist = create_playlist(token, title_without_date)
         playlist_id = playlist["id"]
+        track_ids_set = set()
+        playlists_concern[title_without_date] = {"id": playlist_id, "track_ids": track_ids_set}
         logging.info(f"Created new playlist '{title_without_date}' (id: {playlist_id})")
-
-    track_ids_inside = get_tracks_from_playlist(token, playlist_id)
 
     with csv_path.open('r') as file:
         csv_reader = list(csv.reader(file))
         lines = csv_reader[3:]
         total_songs = len(lines)
+        # Si playlist existe déjà et a assez de tracks, skip
+        if len(track_ids_set) >= total_songs:
+            logging.info(f"Playlist '{title_without_date}' already has {len(track_ids_set)} tracks (CSV: {total_songs}), skipping.")
+            return
         for idx, row in enumerate(lines, 1):
             artist_name = row[1]
             track_name = row[0]
             track = search_the_song(token, artist_name, track_name)
             if track:
-                if track["id"] not in track_ids_inside:
+                if track["id"] not in track_ids_set:
                     add_tracks_to_playlist(token, playlist_id, [track["uri"]])
+                    track_ids_set.add(track["id"])
                     logging.info(f"Added: {track_name} by {artist_name} ({idx}/{total_songs})")
                 else:
                     logging.info(f"Already in playlist: {track_name} by {artist_name} ({idx}/{total_songs})")
@@ -200,7 +232,7 @@ def main():
         logging.error("❌ Failed to obtain a valid user token. Exiting.")
         return
 
-    playlists_concern = get_all_playlists(token)
+    playlists_concern = get_all_playlists_with_tracks(token)
 
     if user_input_update == "update":
         filepath = input("Enter the absolute path of the file you want to update: ")
