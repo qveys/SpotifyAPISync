@@ -1,12 +1,17 @@
-from dotenv import load_dotenv
+from pathlib import Path
+import logging
 import os
 import base64
 import requests
 import json
 import csv
+from dotenv import load_dotenv
 import re
-import logging
 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+
+# Load environment variables
 load_dotenv()
 
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -14,15 +19,18 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
 # Fonction pour obtenir un token d'utilisateur avec authentification OAuth
 def get_user_token(client_id, client_secret, redirect_uri):
+    """Obtain a user token via OAuth. Logs URL, expects code from user."""
     authorization_base_url = "https://accounts.spotify.com/authorize"
     token_url = "https://accounts.spotify.com/api/token"
     scope = "playlist-modify-public playlist-modify-private"
     state = "123"
 
-    auth_url = f"{authorization_base_url}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scope}&state={state}"
-
-    print(f"Please go to this URL and authorize access: {auth_url}")
-    authorization_code = input("Enter the authorization code from the redirect URI: ")
+    auth_url = (
+        f"{authorization_base_url}?response_type=code&client_id={client_id}"
+        f"&redirect_uri={redirect_uri}&scope={scope}&state={state}"
+    )
+    logging.info(f"Go to this URL and authorize access: {auth_url}")
+    authorization_code = input("Enter the authorization code from the redirect URI: ").strip()
 
     headers = {
         "Authorization": "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8"),
@@ -33,25 +41,24 @@ def get_user_token(client_id, client_secret, redirect_uri):
         "code": authorization_code,
         "redirect_uri": redirect_uri
     }
-
     try:
         result = requests.post(token_url, headers=headers, data=data)
         result.raise_for_status()
         json_result = result.json()
         user_token = json_result.get("access_token")
-        if user_token:
-            return user_token
-        else:
-            print("User Token not found in response:", json_result)
+        if not user_token:
+            logging.error(f"User Token not found in response: {json_result}")
+            raise RuntimeError("No access_token in Spotify response")
+        return user_token
     except requests.exceptions.HTTPError as errh:
-        print(f"HTTP Error during user token request: {errh}")
+        logging.error(f"HTTP Error during user token request: {errh}")
+        raise
     except requests.exceptions.RequestException as err:
-        print(f"Request Exception during user token request: {err}")
-
-    return None
+        logging.error(f"Request Exception during user token request: {err}")
+        raise
 
 def get_auth_header(token):
-    return {"Authorization": "Bearer " + token}
+    return {"Authorization": f"Bearer {token}"}
 
 def get_user_details(token):
     url = "https://api.spotify.com/v1/me"
@@ -71,61 +78,60 @@ def get_user_details(token):
 
     return json_result
 
-def get_initial_playlists(token):
-    user_input_playlist = input("Check on your Spotify ID for the total number of playlists and enter the total number of playlists: ")
-    return preexisting_playlist(token, int(user_input_playlist))
-
-def preexisting_playlist(token, total_playlists):
-    my_user_id = get_user_details(token)["id"]
+def get_all_playlists(token):
+    """Fetch all playlists for the current user, returns {name: id}."""
+    user_id = get_user_details(token)["id"]
     limit = 50
     offset = 0
     playlists_concern = {}
-    while offset < total_playlists:
-        url = f"https://api.spotify.com/v1/users/{my_user_id}/playlists?limit={limit}&offset={offset}"
+    while True:
+        url = f"https://api.spotify.com/v1/users/{user_id}/playlists?limit={limit}&offset={offset}"
         headers = get_auth_header(token)
         result = requests.get(url, headers=headers)
-
         if result.status_code != 200:
-            raise Exception(f"Error fetching playlists: HTTP {result.status_code} - {result.text}")
-
-        try:
-            json_result = result.json()
-        except ValueError:
-            raise Exception("Empty or invalid JSON response from Spotify API")
-
+            logging.error(f"Error fetching playlists: HTTP {result.status_code} - {result.text}")
+            raise RuntimeError(f"Spotify API error: {result.text}")
+        json_result = result.json()
         playlists = json_result.get("items", [])
+        if not playlists:
+            break
         for playlist in playlists:
-            playlist_name = playlist["name"]
-            playlists_concern[playlist_name] = playlist["id"]
+            playlists_concern[playlist["name"]] = playlist["id"]
         offset += limit
     return playlists_concern
 
-def create_playlist(token, name):
+def create_playlist(token, name, public=True):
     user_id = get_user_details(token)["id"]
     url = f"https://api.spotify.com/v1/users/{user_id}/playlists"
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
-    data = json.dumps({"name": name, "public": True})
+    data = json.dumps({"name": name, "public": public})
     response = requests.post(url, headers=headers, data=data)
+    if response.status_code != 201:
+        logging.error(f"Failed to create playlist '{name}': {response.text}")
+        raise RuntimeError(f"Spotify API error: {response.text}")
     return response.json()
 
 def get_tracks_from_playlist(token, playlist_id):
     url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
     headers = get_auth_header(token)
     result = requests.get(url, headers=headers)
+    if result.status_code != 200:
+        logging.error(f"Failed to fetch tracks for playlist {playlist_id}: {result.text}")
+        return []
     json_result = result.json()
-    items = json_result.get("items")
-    track_ids = []
-    for playlist_track in items:
-      track_ids.append(playlist_track.get("track", {}).get('id'))
+    items = json_result.get("items", [])
+    track_ids = [track.get("track", {}).get("id") for track in items if track.get("track")]
     return track_ids
-  
-def add_tracks_to_playlist(token, playlist_id, track_ids):
+
+def add_tracks_to_playlist(token, playlist_id, track_uris):
     url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
-    data = json.dumps({"uris": track_ids})
-    requests.post(url, headers=headers, data=data)
+    data = json.dumps({"uris": track_uris})
+    response = requests.post(url, headers=headers, data=data)
+    if response.status_code not in (200, 201):
+        logging.warning(f"Failed to add tracks to playlist: {response.text}")
 
 def search_the_song(token, artist_name, track_name):
     query = f"track:{track_name} artist:{artist_name}"
@@ -143,78 +149,66 @@ def updating_playlist_name(token, playlist_id, new_name):
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
     data = json.dumps({"name": new_name})
-    requests.put(url, headers=headers, data=data)
+    response = requests.put(url, headers=headers, data=data)
+    if response.status_code not in (200, 201):
+        logging.warning(f"Failed to update playlist name: {response.text}")
+
+def process_file(token, playlists_concern, csv_path: Path):
+    title = csv_path.stem
+    title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
+    logging.info(f"Processing file: {csv_path.name} | Title: {title}")
+
+    # Playlist: update name if exists, else create
+    for name in playlists_concern:
+        if name.startswith(title_without_date):
+            logging.info(f"Playlist '{name}' already exists. Updating name to '{title_without_date}' if needed.")
+            playlist_id = playlists_concern[name]
+            updating_playlist_name(token, playlist_id, title_without_date)
+            break
+    else:
+        playlist = create_playlist(token, title_without_date)
+        playlist_id = playlist["id"]
+        logging.info(f"Created new playlist '{title_without_date}' (id: {playlist_id})")
+
+    track_ids_inside = get_tracks_from_playlist(token, playlist_id)
+
+    with csv_path.open('r') as file:
+        csv_reader = list(csv.reader(file))
+        lines = csv_reader[3:]
+        total_songs = len(lines)
+        for idx, row in enumerate(lines, 1):
+            artist_name = row[1]
+            track_name = row[0]
+            track = search_the_song(token, artist_name, track_name)
+            if track:
+                if track["id"] not in track_ids_inside:
+                    add_tracks_to_playlist(token, playlist_id, [track["uri"]])
+                    logging.info(f"Added: {track_name} by {artist_name} ({idx}/{total_songs})")
+                else:
+                    logging.info(f"Already in playlist: {track_name} by {artist_name} ({idx}/{total_songs})")
+            else:
+                logging.warning(f"Not found: {track_name} by {artist_name} in file: {csv_path.name}")
 
 def main():
-    global playlists_concern
-    directory = "/Users/laurent/Downloads/CSV-to-spotify-playlist/csv-to-spotify-playlist"
-    csv_files = [name for name in os.listdir(directory) if name.endswith(".csv")]
-    total_files = len(csv_files)
-    processed_files = 0
+    directory = Path("/Users/laurent/Downloads/CSV-to-spotify-playlist/csv-to-spotify-playlist")
+    csv_files = list(directory.glob("*.csv"))
     user_input_update = input("Do you want to run the whole script or update any existing playlist? (run/update): ").lower()
 
     redirect_uri = "https://www.google.co.in/"
     token = get_user_token(CLIENT_ID, CLIENT_SECRET, redirect_uri)
     if not token:
-        print("❌ Failed to obtain a valid user token. Exiting.")
+        logging.error("❌ Failed to obtain a valid user token. Exiting.")
         return
 
-    playlists_concern = get_initial_playlists(token)
-
-    def process_file(filepath, filename):
-        nonlocal processed_files
-        title, _ = os.path.splitext(os.path.basename(filepath))
-        title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
-
-        print(' ')
-        print(f'Processing file: {filename} ({processed_files + 1}/{total_files} {processed_files+1/total_files*100:.2f}%)')
-        print(f'Title: {title}')
-
-        for name in playlists_concern:
-            if name.startswith(title_without_date):
-                print(f"Playlist with the name {name} already exists")
-                playlist_id = playlists_concern[name]
-                updating_playlist_name(token, playlist_id, title_without_date)
-                break
-        else:
-            playlist = create_playlist(token, title_without_date)
-            playlist_id = playlist["id"]
-
-        track_ids_inside = get_tracks_from_playlist(token, playlist_id)
-      
-        with open(filepath, 'r') as file:
-            csv_reader = list(csv.reader(file))
-            lines = csv_reader[3:]
-            total_songs = len(lines)
-            processed_songs = 0
-            for row in lines:
-                print(' ')
-                print(f'artist: {row[1]}')
-                print(f'track: {row[0]}')
-                artist_name = row[1]
-                track_name = row[0]
-                track = search_the_song(token, artist_name, track_name)
-                processed_songs += 1
-                if track:
-                  if track["id"] not in track_ids_inside:
-                    add_tracks_to_playlist(token, playlist_id, [track["uri"]])
-                    print(f'Adding {track_name} by {artist_name} ({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%)')                    
-                  else:
-                    print(f'This track already inside the playlist: {track_name} by {artist_name} ({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%)')
-                else:
-                    logging.warning(f'This track not found hence not being added to playlist: {track_name} by {artist_name} in file: {filename}')
-                print(' ')
-
-        processed_files += 1
+    playlists_concern = get_all_playlists(token)
 
     if user_input_update == "update":
         filepath = input("Enter the absolute path of the file you want to update: ")
-        filename = os.path.basename(filepath)
-        process_file(filepath, filename)
+        csv_path = Path(filepath)
+        process_file(token, playlists_concern, csv_path)
     else:
-        for filename in csv_files:
-            filepath = os.path.join(directory, filename)
-            process_file(filepath, filename)
+        for csv_path in csv_files:
+            process_file(token, playlists_concern, csv_path)
 
 if __name__ == "__main__":
     main()
