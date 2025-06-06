@@ -311,7 +311,7 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats', proce
                     track_ids_set.add(track["id"])
                     stats.tracks_added += 1
                     processed_songs += 1
-                    logging.info(f"({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%) >Track to add: {track_name} by {artist_name}")
+                    logging.info(f"({processed_songs}/{total_songs} {processed_songs/total_songs*100:.2f}%) > Track to add: {track_name} by {artist_name}\n")
                 else:
                     stats.tracks_already_present += 1
             else:
@@ -320,7 +320,7 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats', proce
         if to_add_uris:
             add_tracks_to_playlist_batch(token, playlist_id, to_add_uris, processed_songs=processed_songs, total_songs=total_songs)
         else:
-            logging.info(f"No new tracks to add for playlist '{title_without_date}'")
+            logging.info(f"No new tracks to add for playlist '{title_without_date}'\n")
 
 # --- Orchestration globale ---
 def main():
