@@ -18,7 +18,7 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
 # --- Utilitaires génériques ---
-def http_request(method, url, headers=None, data=None, params=None, max_retries=3, timeout=10):
+def http_request(method, url, headers=None, data=None, params=None, max_retries=5, timeout=10):
     for attempt in range(1, max_retries + 1):
         try:
             if method == 'GET':
@@ -29,20 +29,21 @@ def http_request(method, url, headers=None, data=None, params=None, max_retries=
                 resp = requests.put(url, headers=headers, data=data, params=params, timeout=timeout)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
+            print(f"\n")
             # Gestion du rate limit Spotify (429)
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", "5"))
                 logging.warning(f"Rate limited by Spotify (429). Waiting {retry_after} seconds before retrying...")
-                time.sleep(retry_after)
+                time.sleep(3 ** retry_after)
                 continue
             if resp.status_code >= 500:
                 logging.warning(f"HTTP {resp.status_code} on {url}, retrying ({attempt}/{max_retries})...")
-                time.sleep(2 ** attempt)
+                time.sleep(3 ** attempt)
                 continue
             return resp
         except requests.RequestException as e:
             logging.warning(f"Request error: {e}, retrying ({attempt}/{max_retries})...")
-            time.sleep(2 ** attempt)
+            time.sleep(3 ** attempt)
     logging.error(f"Failed to {method} {url} after {max_retries} attempts.")
     raise RuntimeError(f"HTTP request failed: {method} {url}")
 
@@ -230,6 +231,7 @@ class Stats:
         self.tracks_not_found = 0
         self.files_skipped = 0
     def print_summary(self):
+        print("\n")
         print("\n--- Résumé de la synchronisation Spotify ---")
         print(f"Playlists créées : {self.playlists_created}")
         print(f"Playlists renommées : {self.playlists_updated}")
@@ -243,6 +245,7 @@ class Stats:
 def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
     title = csv_path.stem
     title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
+    print(f"\n")
     logging.info(f"Processing file: {csv_path.name} | Title: {title}")
     playlist_id = None
     track_ids_set = set()
@@ -296,6 +299,7 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
                 else:
                     stats.tracks_already_present += 1
             else:
+                print('\n')
                 logging.warning(f"Not found: {track_name} by {artist_name} in file: {csv_path.name}")
                 stats.tracks_not_found += 1
         if to_add_uris:
