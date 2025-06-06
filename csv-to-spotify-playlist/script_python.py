@@ -42,6 +42,21 @@ def http_request(method, url, headers=None, data=None, params=None, max_retries=
     logging.error(f"Failed to {method} {url} after {max_retries} attempts.")
     raise RuntimeError(f"HTTP request failed: {method} {url}")
 
+def get_token_with_refresh(client_id, client_secret, refresh_token):
+    token_url = "https://accounts.spotify.com/api/token"
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8"),
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+    result = http_request('POST', token_url, headers=headers, data=data)
+    result.raise_for_status()
+    json_result = result.json()
+    return json_result.get("access_token"), json_result.get("refresh_token", refresh_token)
+
 # Fonction pour obtenir un token d'utilisateur avec authentification OAuth
 def get_user_token(client_id, client_secret, redirect_uri):
     """Obtain a user token via OAuth. Logs URL, expects code from user."""
@@ -71,10 +86,11 @@ def get_user_token(client_id, client_secret, redirect_uri):
         result.raise_for_status()
         json_result = result.json()
         user_token = json_result.get("access_token")
+        refresh_token = json_result.get("refresh_token")
         if not user_token:
             logging.error(f"User Token not found in response: {json_result}")
             raise RuntimeError("No access_token in Spotify response")
-        return user_token
+        return user_token, refresh_token
     except requests.exceptions.HTTPError as errh:
         logging.error(f"HTTP Error during user token request: {errh}")
         raise
@@ -216,7 +232,25 @@ def updating_playlist_name(token, playlist_id, new_name):
     if response.status_code not in (200, 201):
         logging.warning(f"Failed to update playlist name: {response.text}")
 
-def process_file(token, playlists_concern, csv_path: Path):
+class Stats:
+    def __init__(self):
+        self.playlists_created = 0
+        self.playlists_updated = 0
+        self.tracks_added = 0
+        self.tracks_already_present = 0
+        self.tracks_not_found = 0
+        self.files_skipped = 0
+    def print_summary(self):
+        print("\n--- Résumé de la synchronisation Spotify ---")
+        print(f"Playlists créées : {self.playlists_created}")
+        print(f"Playlists renommées : {self.playlists_updated}")
+        print(f"Tracks ajoutés : {self.tracks_added}")
+        print(f"Tracks déjà présents : {self.tracks_already_present}")
+        print(f"Tracks non trouvés : {self.tracks_not_found}")
+        print(f"Fichiers CSV ignorés (playlist déjà complète) : {self.files_skipped}")
+        print("-------------------------------------------\n")
+
+def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
     title = csv_path.stem
     title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
     logging.info(f"Processing file: {csv_path.name} | Title: {title}")
@@ -232,6 +266,7 @@ def process_file(token, playlists_concern, csv_path: Path):
             if name != title_without_date:
                 updating_playlist_name(token, playlist_id, title_without_date)
                 logging.info(f"Updated playlist name from '{name}' to '{title_without_date}'")
+                stats.playlists_updated += 1
             break
     if not playlist_found:
         playlist = create_playlist(token, title_without_date)
@@ -239,6 +274,7 @@ def process_file(token, playlists_concern, csv_path: Path):
         track_ids_set = set()
         playlists_concern[title_without_date] = {"id": playlist_id, "track_ids": track_ids_set}
         logging.info(f"Created new playlist '{title_without_date}' (id: {playlist_id})")
+        stats.playlists_created += 1
 
     with csv_path.open('r') as file:
         csv_reader = list(csv.reader(file))
@@ -246,13 +282,12 @@ def process_file(token, playlists_concern, csv_path: Path):
         total_songs = len(lines)
         if len(track_ids_set) >= total_songs:
             logging.info(f"Playlist '{title_without_date}' already has {len(track_ids_set)} tracks (CSV: {total_songs}), skipping.")
+            stats.files_skipped += 1
             return
-        # Prépare la liste des requêtes (artist, track)
         search_args = [(token, row[1], row[0]) for row in lines]
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             future_to_idx = {executor.submit(search_the_song, *args): idx for idx, args in enumerate(search_args)}
-            # On récupère les résultats dans l'ordre d'origine
             results = [None] * len(lines)
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
@@ -269,12 +304,34 @@ def process_file(token, playlists_concern, csv_path: Path):
                 if track["id"] not in track_ids_set:
                     to_add_uris.append(track["uri"])
                     track_ids_set.add(track["id"])
+                    stats.tracks_added += 1
+                else:
+                    stats.tracks_already_present += 1
             else:
                 logging.warning(f"Not found: {track_name} by {artist_name} in file: {csv_path.name}")
+                stats.tracks_not_found += 1
         if to_add_uris:
             add_tracks_to_playlist_batch(token, playlist_id, to_add_uris)
         else:
             logging.info(f"No new tracks to add for playlist '{title_without_date}'")
+
+def update_env_refresh_token(refresh_token, path=".env"):
+    import os
+    lines = []
+    found = False
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            for line in f:
+                if line.startswith("REFRESH_TOKEN="):
+                    lines.append(f"REFRESH_TOKEN={refresh_token}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f"REFRESH_TOKEN={refresh_token}\n")
+    with open(path, "w") as f:
+        f.writelines(lines)
+    logging.info(f"REFRESH_TOKEN updated in {path}")
 
 def main():
     directory = Path("/Users/laurent/Downloads/CSV-to-spotify-playlist/csv-to-spotify-playlist")
@@ -282,20 +339,36 @@ def main():
     user_input_update = input("Do you want to run the whole script or update any existing playlist? (run/update): ").lower()
 
     redirect_uri = "https://www.google.co.in/"
-    token = get_user_token(CLIENT_ID, CLIENT_SECRET, redirect_uri)
+    refresh_token = os.getenv("REFRESH_TOKEN")
+    token = None
+    new_refresh_token = None
+    if refresh_token:
+        try:
+            token, new_refresh_token = get_token_with_refresh(CLIENT_ID, CLIENT_SECRET, refresh_token)
+            logging.info("Obtained access_token via refresh_token.")
+            if new_refresh_token and new_refresh_token != refresh_token:
+                update_env_refresh_token(new_refresh_token)
+        except Exception as e:
+            logging.warning(f"Refresh token failed: {e}. Falling back to manual authorization.")
+    if not token:
+        token, new_refresh_token = get_user_token(CLIENT_ID, CLIENT_SECRET, redirect_uri)
+        if new_refresh_token:
+            update_env_refresh_token(new_refresh_token)
     if not token:
         logging.error("❌ Failed to obtain a valid user token. Exiting.")
         return
 
     playlists_concern = get_all_playlists_with_tracks(token)
+    stats = Stats()
 
     if user_input_update == "update":
         filepath = input("Enter the absolute path of the file you want to update: ")
         csv_path = Path(filepath)
-        process_file(token, playlists_concern, csv_path)
+        process_file(token, playlists_concern, csv_path, stats)
     else:
         for csv_path in csv_files:
-            process_file(token, playlists_concern, csv_path)
+            process_file(token, playlists_concern, csv_path, stats)
+    stats.print_summary()
 
 if __name__ == "__main__":
     main()
