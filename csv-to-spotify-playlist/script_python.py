@@ -1,25 +1,23 @@
-from pathlib import Path
-import logging
+# --- Imports ---
 import os
+import time
 import base64
 import requests
 import json
 import csv
-from dotenv import load_dotenv
 import re
-import time
+import logging
+from pathlib import Path
+from dotenv import load_dotenv
 import concurrent.futures
 
-# Setup logging
+# --- Config / Setup ---
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
-
-# Load environment variables
 load_dotenv()
-
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
-# --- HTTP request utilitaire avec retry et timeout ---
+# --- Utilitaires génériques ---
 def http_request(method, url, headers=None, data=None, params=None, max_retries=3, timeout=10):
     for attempt in range(1, max_retries + 1):
         try:
@@ -42,36 +40,35 @@ def http_request(method, url, headers=None, data=None, params=None, max_retries=
     logging.error(f"Failed to {method} {url} after {max_retries} attempts.")
     raise RuntimeError(f"HTTP request failed: {method} {url}")
 
-def get_token_with_refresh(client_id, client_secret, refresh_token):
-    token_url = "https://accounts.spotify.com/api/token"
-    headers = {
-        "Authorization": "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8"),
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token
-    }
-    result = http_request('POST', token_url, headers=headers, data=data)
-    result.raise_for_status()
-    json_result = result.json()
-    return json_result.get("access_token"), json_result.get("refresh_token", refresh_token)
+def update_env_refresh_token(refresh_token, path=".env"):
+    lines = []
+    found = False
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            for line in f:
+                if line.startswith("REFRESH_TOKEN="):
+                    lines.append(f"REFRESH_TOKEN={refresh_token}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f"REFRESH_TOKEN={refresh_token}\n")
+    with open(path, "w") as f:
+        f.writelines(lines)
+    logging.info(f"REFRESH_TOKEN updated in {path}")
 
-# Fonction pour obtenir un token d'utilisateur avec authentification OAuth
+# --- Spotify API Wrappers ---
 def get_user_token(client_id, client_secret, redirect_uri):
-    """Obtain a user token via OAuth. Logs URL, expects code from user."""
     authorization_base_url = "https://accounts.spotify.com/authorize"
     token_url = "https://accounts.spotify.com/api/token"
     scope = "playlist-modify-public playlist-modify-private"
     state = "123"
-
     auth_url = (
         f"{authorization_base_url}?response_type=code&client_id={client_id}"
         f"&redirect_uri={redirect_uri}&scope={scope}&state={state}"
     )
     logging.info(f"Go to this URL and authorize access: {auth_url}")
     authorization_code = input("Enter the authorization code from the redirect URI: ").strip()
-
     headers = {
         "Authorization": "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8"),
         "Content-Type": "application/x-www-form-urlencoded"
@@ -98,6 +95,21 @@ def get_user_token(client_id, client_secret, redirect_uri):
         logging.error(f"Request Exception during user token request: {err}")
         raise
 
+def get_token_with_refresh(client_id, client_secret, refresh_token):
+    token_url = "https://accounts.spotify.com/api/token"
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8"),
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+    result = http_request('POST', token_url, headers=headers, data=data)
+    result.raise_for_status()
+    json_result = result.json()
+    return json_result.get("access_token"), json_result.get("refresh_token", refresh_token)
+
 def get_auth_header(token):
     return {"Authorization": f"Bearer {token}"}
 
@@ -105,28 +117,22 @@ def get_user_details(token):
     url = "https://api.spotify.com/v1/me"
     headers = get_auth_header(token)
     result = http_request('GET', url, headers=headers)
-
     try:
         json_result = result.json()
     except ValueError:
         raise Exception("Invalid response from Spotify API")
-
     if result.status_code != 200:
         raise Exception(f"Spotify API error: {json_result.get('error', {}).get('message', 'Unknown error')}")
-
     if "id" not in json_result:
         raise KeyError("The 'id' key is missing in the response from Spotify. Response: " + str(json_result))
-
     return json_result
 
+# --- Fonctions métier ---
 def get_all_playlists_with_tracks(token):
-    """Retourne {playlist_name: {'id': ..., 'track_ids': set([...])}}"""
     user_id = get_user_details(token)["id"]
     limit = 50
     offset = 0
     playlists = {}
-
-    # Récupère toutes les playlists
     while True:
         url = f"https://api.spotify.com/v1/users/{user_id}/playlists?limit={limit}&offset={offset}"
         headers = get_auth_header(token)
@@ -138,11 +144,9 @@ def get_all_playlists_with_tracks(token):
         for playlist in items:
             playlists[playlist["name"]] = {
                 "id": playlist["id"],
-                "track_ids": set()  # On remplit après
+                "track_ids": set()
             }
         offset += limit
-
-    # Pour chaque playlist, récupère tous les track IDs (pagination)
     for name, info in playlists.items():
         pid = info["id"]
         track_ids = set()
@@ -163,7 +167,6 @@ def get_all_playlists_with_tracks(token):
                 break
             t_offset += t_limit
         playlists[name]["track_ids"] = track_ids
-
     return playlists
 
 def create_playlist(token, name, public=True):
@@ -178,26 +181,25 @@ def create_playlist(token, name, public=True):
         raise RuntimeError(f"Spotify API error: {response.text}")
     return response.json()
 
-def get_tracks_from_playlist(token, playlist_id):
-    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
-    headers = get_auth_header(token)
-    result = http_request('GET', url, headers=headers)
-    if result.status_code != 200:
-        logging.error(f"Failed to fetch tracks for playlist {playlist_id}: {result.text}")
-        return []
-    json_result = result.json()
-    items = json_result.get("items", [])
-    track_ids = [track.get("track", {}).get("id") for track in items if track.get("track")]
-    return track_ids
-
-def add_tracks_to_playlist(token, playlist_id, track_uris):
-    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+def updating_playlist_name(token, playlist_id, new_name):
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}"
     headers = get_auth_header(token)
     headers["Content-Type"] = "application/json"
-    data = json.dumps({"uris": track_uris})
-    response = http_request('POST', url, headers=headers, data=data)
+    data = json.dumps({"name": new_name})
+    response = http_request('PUT', url, headers=headers, data=data)
     if response.status_code not in (200, 201):
-        logging.warning(f"Failed to add tracks to playlist: {response.text}")
+        logging.warning(f"Failed to update playlist name: {response.text}")
+
+def search_the_song(token, artist_name, track_name):
+    query = f"track:{track_name} artist:{artist_name}"
+    url = f"https://api.spotify.com/v1/search?q={requests.utils.quote(query)}&type=track&limit=1"
+    headers = get_auth_header(token)
+    result = http_request('GET', url, headers=headers)
+    json_result = result.json()
+    tracks = json_result.get("tracks", {}).get("items")
+    if tracks:
+        return tracks[0]
+    return None
 
 def add_tracks_to_playlist_batch(token, playlist_id, track_uris):
     url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
@@ -212,26 +214,7 @@ def add_tracks_to_playlist_batch(token, playlist_id, track_uris):
         else:
             logging.info(f"Added {len(batch)} tracks to playlist (id: {playlist_id})")
 
-def search_the_song(token, artist_name, track_name):
-    query = f"track:{track_name} artist:{artist_name}"
-    url = f"https://api.spotify.com/v1/search?q={requests.utils.quote(query)}&type=track&limit=1"
-    headers = get_auth_header(token)
-    result = http_request('GET', url, headers=headers)
-    json_result = result.json()
-    tracks = json_result.get("tracks", {}).get("items")
-    if tracks:
-        return tracks[0]
-    return None
-
-def updating_playlist_name(token, playlist_id, new_name):
-    url = f"https://api.spotify.com/v1/playlists/{playlist_id}"
-    headers = get_auth_header(token)
-    headers["Content-Type"] = "application/json"
-    data = json.dumps({"name": new_name})
-    response = http_request('PUT', url, headers=headers, data=data)
-    if response.status_code not in (200, 201):
-        logging.warning(f"Failed to update playlist name: {response.text}")
-
+# --- Stats class ---
 class Stats:
     def __init__(self):
         self.playlists_created = 0
@@ -250,11 +233,11 @@ class Stats:
         print(f"Fichiers CSV ignorés (playlist déjà complète) : {self.files_skipped}")
         print("-------------------------------------------\n")
 
+# --- Traitement principal d'un fichier CSV ---
 def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
     title = csv_path.stem
     title_without_date = re.sub(r'-\d{2}-\d{2}-\d{4}$', '', title)
     logging.info(f"Processing file: {csv_path.name} | Title: {title}")
-
     playlist_id = None
     track_ids_set = set()
     playlist_found = False
@@ -275,7 +258,6 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
         playlists_concern[title_without_date] = {"id": playlist_id, "track_ids": track_ids_set}
         logging.info(f"Created new playlist '{title_without_date}' (id: {playlist_id})")
         stats.playlists_created += 1
-
     with csv_path.open('r') as file:
         csv_reader = list(csv.reader(file))
         lines = csv_reader[3:]
@@ -315,29 +297,11 @@ def process_file(token, playlists_concern, csv_path: Path, stats: 'Stats'):
         else:
             logging.info(f"No new tracks to add for playlist '{title_without_date}'")
 
-def update_env_refresh_token(refresh_token, path=".env"):
-    import os
-    lines = []
-    found = False
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            for line in f:
-                if line.startswith("REFRESH_TOKEN="):
-                    lines.append(f"REFRESH_TOKEN={refresh_token}\n")
-                    found = True
-                else:
-                    lines.append(line)
-    if not found:
-        lines.append(f"REFRESH_TOKEN={refresh_token}\n")
-    with open(path, "w") as f:
-        f.writelines(lines)
-    logging.info(f"REFRESH_TOKEN updated in {path}")
-
+# --- Orchestration globale ---
 def main():
     directory = Path("/Users/laurent/Downloads/CSV-to-spotify-playlist/csv-to-spotify-playlist")
     csv_files = list(directory.glob("*.csv"))
     user_input_update = input("Do you want to run the whole script or update any existing playlist? (run/update): ").lower()
-
     redirect_uri = "https://www.google.co.in/"
     refresh_token = os.getenv("REFRESH_TOKEN")
     token = None
@@ -357,10 +321,8 @@ def main():
     if not token:
         logging.error("❌ Failed to obtain a valid user token. Exiting.")
         return
-
     playlists_concern = get_all_playlists_with_tracks(token)
     stats = Stats()
-
     if user_input_update == "update":
         filepath = input("Enter the absolute path of the file you want to update: ")
         csv_path = Path(filepath)
@@ -370,5 +332,6 @@ def main():
             process_file(token, playlists_concern, csv_path, stats)
     stats.print_summary()
 
+# --- Point d'entrée ---
 if __name__ == "__main__":
     main()
